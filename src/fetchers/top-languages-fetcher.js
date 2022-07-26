@@ -1,7 +1,12 @@
-const { request, logger } = require("../common/utils");
+// @ts-check
+const { request, logger, MissingParamError } = require("../common/utils");
 const retryer = require("../common/retryer");
 require("dotenv").config();
 
+/**
+ * @param {import('Axios').AxiosRequestHeaders} variables
+ * @param {string} token
+ */
 const fetcher = (variables, token) => {
   return request(
     {
@@ -11,6 +16,7 @@ const fetcher = (variables, token) => {
           # fetch only owner repos & not forks
           repositories(ownerAffiliations: OWNER, isFork: false, first: 100) {
             nodes {
+              name
               languages(first: 10, orderBy: {field: SIZE, direction: DESC}) {
                 edges {
                   size
@@ -28,15 +34,20 @@ const fetcher = (variables, token) => {
       variables,
     },
     {
-      Authorization: `bearer ${token}`,
-    }
+      Authorization: `token ${token}`,
+    },
   );
 };
 
-async function fetchTopLanguages(username) {
-  if (!username) throw Error("Invalid username");
+/**
+ * @param {string} username
+ * @param {string[]} exclude_repo
+ * @returns {Promise<import("./types").TopLangData>}
+ */
+async function fetchTopLanguages(username, exclude_repo = []) {
+  if (!username) throw new MissingParamError(["username"]);
 
-  let res = await retryer(fetcher, { login: username });
+  const res = await retryer(fetcher, { login: username });
 
   if (res.data.errors) {
     logger.error(res.data.errors);
@@ -44,6 +55,22 @@ async function fetchTopLanguages(username) {
   }
 
   let repoNodes = res.data.data.user.repositories.nodes;
+  let repoToHide = {};
+
+  // populate repoToHide map for quick lookup
+  // while filtering out
+  if (exclude_repo) {
+    exclude_repo.forEach((repoName) => {
+      repoToHide[repoName] = true;
+    });
+  }
+
+  // filter out repositories to be hidden
+  repoNodes = repoNodes
+    .sort((a, b) => b.size - a.size)
+    .filter((name) => {
+      return !repoToHide[name.name];
+    });
 
   repoNodes = repoNodes
     .filter((node) => {
@@ -51,7 +78,6 @@ async function fetchTopLanguages(username) {
     })
     // flatten the list of language nodes
     .reduce((acc, curr) => curr.languages.edges.concat(acc), [])
-    .sort((a, b) => b.size - a.size)
     .reduce((acc, prev) => {
       // get the size of the language (bytes)
       let langSize = prev.size;
@@ -73,7 +99,7 @@ async function fetchTopLanguages(username) {
     }, {});
 
   const topLangs = Object.keys(repoNodes)
-    .slice(0, 5)
+    .sort((a, b) => repoNodes[b].size - repoNodes[a].size)
     .reduce((result, key) => {
       result[key] = repoNodes[key];
       return result;
